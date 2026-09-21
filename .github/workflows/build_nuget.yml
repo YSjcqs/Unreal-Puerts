@@ -1,6 +1,28 @@
-name: Build Nuget
+name: nuget build & publish
 
 on:
+  push:
+    paths: 
+      - unity/upms/**
+      - unity/test/**
+      - unity/native/**
+      - unity/cli/**
+      - unreal/Puerts/Source/JsEnv/Private/V8InspectorImpl.cpp
+      - unreal/Puerts/Source/JsEnv/Private/V8InspectorImpl.h
+      - unreal/Puerts/Source/JsEnv/Private/WebSocketImpl.cpp
+      - unreal/Puerts/Source/JsEnv/Private/PromiseRejectCallback.hpp
+      - .github/workflows/build_nuget.yml
+  pull_request:
+    paths: 
+      - unity/upms/**
+      - unity/test/**
+      - unity/native/**
+      - unity/cli/**
+      - unreal/Puerts/Source/JsEnv/Private/V8InspectorImpl.cpp
+      - unreal/Puerts/Source/JsEnv/Private/V8InspectorImpl.h
+      - unreal/Puerts/Source/JsEnv/Private/WebSocketImpl.cpp
+      - unreal/Puerts/Source/JsEnv/Private/PromiseRejectCallback.hpp
+      - .github/workflows/build_nuget.yml
   workflow_dispatch:
     inputs:
       publish:
@@ -25,7 +47,7 @@ jobs:
             arch: x64
           - os: macos-15
             platform: osx
-            arch: auto
+            arch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -49,9 +71,27 @@ jobs:
           for backend in $backends; do
             echo "Building $backend for ${{ matrix.platform }}-${{ matrix.arch }}"
             cd "$repo_root/unity/native/$backend"
-            node ../../cli make --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+            node ../../cli make --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --expose_gc
             cd "$repo_root"
           done
+
+          # Copy system Python's lib-dynload directory
+          python_version=$(python3 --version | awk '{print $2}' | cut -d. -f1,2)
+          echo "Python version: $python_version"
+          
+          # Find lib-dynload directory using sysconfig
+          lib_dynload_path=$(python3 -c "import sysconfig; import os; stdlib = sysconfig.get_path('stdlib'); print(os.path.join(stdlib, 'lib-dynload'))")
+          echo "lib-dynload path: $lib_dynload_path"
+          
+          if [ -d "$lib_dynload_path" ]; then
+            dest_path="$repo_root/unity/native/papi-python/build_linux_x64_papi-python/lib-dynload"
+            mkdir -p "$dest_path"
+            cp -r "$lib_dynload_path"/* "$dest_path/"
+            echo "Copied lib-dynload to $dest_path"
+            ls -la "$dest_path"
+          else
+            echo "Warning: lib-dynload directory not found at $lib_dynload_path"
+          fi
 
       - name: Build all native backends (macOS)
         if: runner.os == 'macOS'
@@ -63,12 +103,7 @@ jobs:
           for backend in $backends; do
             echo "Building $backend for ${{ matrix.platform }}"
             cd "$repo_root/unity/native/$backend"
-            # if python backend, specify arch to arm64
-            if [ "$backend" = "papi-python" ] && [ "${{ matrix.arch }}" = "auto" ]; then
-              node ../../cli make --platform ${{ matrix.platform }} --arch arm64
-            else
-              node ../../cli make --platform ${{ matrix.platform }}
-            fi
+            node ../../cli make --platform ${{ matrix.platform }} --arch arm64 --expose_gc
             cd "$repo_root"
           done
 
@@ -81,7 +116,7 @@ jobs:
           foreach ($backend in $backends) {
             Write-Host "Building $backend for ${{ matrix.platform }}-${{ matrix.arch }}"
             Set-Location "$repoRoot/unity/native/$backend"
-            node ../../cli make --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+            node ../../cli make --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --expose_gc
             Set-Location $repoRoot
           }
         shell: pwsh
@@ -91,7 +126,7 @@ jobs:
         # generated builds unity/upms/*/Plugins/macOS/*.bundle
         # Rename macOS bundle format to dylib files to ensure upload-artifact works correctly
       - name: Process macOS native artifacts
-        if: runner.os == 'macOS' && matrix.arch == 'auto'
+        if: runner.os == 'macOS'
         run: |
           set -ex
           for dir in unity/upms/*/Plugins/macOS; do
@@ -123,6 +158,11 @@ jobs:
           }
           if ("${{ matrix.platform }}" -eq "osx" -and (Test-Path "unity/upms/nodejs/Plugins/macOS")) {
             Move-Item -Path "unity/native/papi-nodejs/.backends/papi-nodejs/lib/macOS/libnode.93.dylib" -Destination "unity/upms/nodejs/Plugins/macOS/libnode.93.dylib" -Force
+            
+            $oldPath = "/Library/Frameworks/Python.framework/Versions/3.14/Python"
+            $newPath = "@loader_path/libpython3.14.dylib"
+            $plugin = "unity/upms/python/Plugins/macOS/arm64/libPapiPython.dylib"
+            install_name_tool -change $oldPath $newPath $plugin
           }
           if ("${{ matrix.platform }}" -eq "win") {
             # Remove python's PuertsCore.dll on Windows
@@ -161,6 +201,7 @@ jobs:
             
             unity/native/papi-python/build_${{ matrix.platform }}_${{ matrix.arch }}_*/Release/*.dll
             unity/native/papi-python/build_${{ matrix.platform }}_${{ matrix.arch }}_*/lib*.so
+            unity/native/papi-python/build_linux_x64_papi-python/lib-dynload/**
             
             unity/native/puerts/build_${{ matrix.platform }}_${{ matrix.arch }}_*/Release/*.dll
             unity/native/puerts/build_${{ matrix.platform }}_${{ matrix.arch }}_*/lib*.so
@@ -168,6 +209,11 @@ jobs:
     name: Pack NuGet
     needs: build
     runs-on: windows-2022
+    # NuGet/login 依赖 GitHub OIDC 换发短期 API Key（Trusted Publishing），
+    # 必须声明 id-token: write，否则无法签发 OIDC token。
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -201,16 +247,67 @@ jobs:
           mkdir "$destPath/lib"
           Move-Item -Path "$destPath/python3.14" -Destination "$destPath/lib" -Force
           Remove-Item -Path "$destPath/python" -Recurse -Force
+
+          # Copy system lib-dynload files to extracted Python directory
+          $systemLibDynloadPath = "$destPath/lib-dynload"
+          $targetLibDynloadPath = "$destPath/lib/python3.14/lib-dynload"
+          
+          if (Test-Path $systemLibDynloadPath) {
+            Write-Host "Copying system lib-dynload files to $targetLibDynloadPath"
+            if (-not (Test-Path $targetLibDynloadPath)) {
+              New-Item -ItemType Directory -Path $targetLibDynloadPath -Force | Out-Null
+            }
+            
+            Get-ChildItem -Path $systemLibDynloadPath -File | ForEach-Object {
+              $targetFile = Join-Path $targetLibDynloadPath $_.Name
+              if (-not (Test-Path $targetFile)) {
+                Copy-Item -Path $_.FullName -Destination $targetFile -Force
+                Write-Host "Copied $($_.Name)"
+              } else {
+                Write-Host "Skipped $($_.Name) (already exists)"
+              }
+            }
+            
+            # Remove the temporary lib-dynload directory
+            Remove-Item -Path $systemLibDynloadPath -Recurse -Force
+            Write-Host "Removed temporary lib-dynload directory"
+          } else {
+            Write-Host "Warning: System lib-dynload directory not found at $systemLibDynloadPath"
+          }
           
         shell: pwsh
+      - name: Download Python (macOS)
+        run: |
+          $destPath = "unity/nuget/downloaded_natives/natives-osx-arm64/upms/python/Plugins/macOS/arm64"
+          $downloadedEmbedZip = "$env:TEMP/cpython-3.14.2+20260127-aarch64-apple-darwin-install_only.tar.gz"
+          $downloadUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/20260127/cpython-3.14.2+20260127-aarch64-apple-darwin-install_only.tar.gz"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadedEmbedZip
+          tree unity/nuget/downloaded_natives
+          tar -xzf $downloadedEmbedZip -C $destPath
+
+          # Move $destPath/python3.14 to $destPath/lib
+          Move-Item -Path "$destPath/python/lib/*" -Destination $destPath -Force
+          mkdir "$destPath/lib"
+          Move-Item -Path "$destPath/python3.14" -Destination "$destPath/lib" -Force
+          Remove-Item -Path "$destPath/python" -Recurse -Force
+
+        shell: pwsh
+      # Trusted Publishing (https://learn.microsoft.com/zh-cn/nuget/nuget-org/trusted-publishing):
+      # 不再使用固定的 NUGET_API_KEY，改为经 GitHub OIDC 换发 1 小时有效的短期 API Key。
+      - name: NuGet login (trusted publishing)
+        if: ${{ github.event.inputs.publish == 'true' }}
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: ${{ secrets.NUGET_USER }}
       - name: Run NuGet Packaging and Publishing
         if: ${{ github.event.inputs.publish == 'true' }}
         run: |
           cd unity/nuget
-          .\build.ps1 --NativeAssetsDirectory "$pwd\downloaded_natives" --ProjectsRoot "$pwd" --Source "https://api.nuget.org/v3/index.json" --ApiKey "${{ secrets.NUGET_API_KEY }}"
+          .\build.ps1 --NativeAssetsDirectory "$pwd\downloaded_natives" --ProjectsRoot "$pwd" --Source "https://api.nuget.org/v3/index.json" --ApiKey "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
         shell: pwsh
       - name: Run NuGet Packaging
-        if: ${{ github.event.inputs.publish == 'false' }}
+        if: ${{ github.event.inputs.publish != 'true' }}
         run: |
           cd unity/nuget
           .\build.ps1 --NativeAssetsDirectory "$pwd\downloaded_natives" --ProjectsRoot "$pwd"
@@ -222,3 +319,57 @@ jobs:
           path: |
             unity/nuget/packageOutput/*.nupkg
             unity/nuget/packageOutput/*.snupkg
+  windows_test:
+    name: window unit test
+    needs: pack_nuget
+    runs-on: windows-2022
+    if: ${{ github.event.inputs.publish != 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download nuget-packages
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-packages 
+          path: unity/test/nuget/nuget-packages
+      - name: Run dotnet test
+        run: |
+          cd unity/test/nuget/projects
+          dotnet test
+        shell: pwsh
+
+  linux_test:
+    name: linux unit test
+    needs: pack_nuget
+    runs-on: ubuntu-22.04
+    if: ${{ github.event.inputs.publish != 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download nuget-packages
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-packages 
+          path: unity/test/nuget/nuget-packages
+      - name: Run dotnet test
+        run: |
+          cd unity/test/nuget/projects
+          dotnet test
+      
+  osx_test:
+    name: macOS unit test
+    needs: pack_nuget
+    runs-on: macos-15
+    if: ${{ github.event.inputs.publish != 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download nuget-packages
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-packages
+          path: unity/test/nuget/nuget-packages
+      - name: Run dotnet test
+        run: |
+          cd unity/test/nuget/projects
+          dotnet test

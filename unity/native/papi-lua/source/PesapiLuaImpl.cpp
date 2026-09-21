@@ -313,35 +313,43 @@ int pesapi_is_int32(pesapi_env env, pesapi_value pvalue)
 {
     lua_State* L = luaStateFromPesapiEnv(env);
     int idx = luaValueFromPesapiValue(pvalue);
-    return lua_type(L, idx) == LUA_TNUMBER;
+    if (!lua_isinteger(L, idx)) {
+        return 0;
+    }
+    const lua_Integer value = lua_tointeger(L, idx);
+    return value >= INT32_MIN && value <= INT32_MAX;
 }
 
 int pesapi_is_uint32(pesapi_env env, pesapi_value pvalue)
 {
     lua_State* L = luaStateFromPesapiEnv(env);
     int idx = luaValueFromPesapiValue(pvalue);
-    return lua_type(L, idx) == LUA_TNUMBER;
+    if (!lua_isinteger(L, idx)) {
+        return 0;
+    }
+    const lua_Integer value = lua_tointeger(L, idx);
+    return value >= 0 && static_cast<uint64_t>(value) <= UINT32_MAX;
 }
 
 int pesapi_is_int64(pesapi_env env, pesapi_value pvalue)
 {
     lua_State* L = luaStateFromPesapiEnv(env);
     int idx = luaValueFromPesapiValue(pvalue);
-    return lua_type(L, idx) == LUA_TNUMBER;
+    return lua_isinteger(L, idx);
 }
 
 int pesapi_is_uint64(pesapi_env env, pesapi_value pvalue)
 {
     lua_State* L = luaStateFromPesapiEnv(env);
     int idx = luaValueFromPesapiValue(pvalue);
-    return lua_type(L, idx) == LUA_TNUMBER;
+    return lua_isinteger(L, idx) && lua_tointeger(L, idx) >= 0;
 }
 
 int pesapi_is_double(pesapi_env env, pesapi_value pvalue)
 {
     lua_State* L = luaStateFromPesapiEnv(env);
     int idx = luaValueFromPesapiValue(pvalue);
-    return lua_type(L, idx) == LUA_TNUMBER;
+    return lua_isnumber(L, idx) && !lua_isinteger(L, idx);
 }
 
 int pesapi_is_string(pesapi_env env, pesapi_value pvalue)
@@ -508,7 +516,11 @@ void pesapi_add_return(pesapi_callback_info pinfo, pesapi_value value)
 void pesapi_throw_by_string(pesapi_callback_info pinfo, const char* msg)
 {
     auto info = reinterpret_cast<pesapi::luaimpl::pesapi_callback_info__*>(pinfo);
-    luaL_error(info->L, "%s", msg);
+    // Deferred error: do not call luaL_error directly here to avoid longjmp
+    // across C++ try-catch blocks. The error will be raised after the callback returns.
+    lua_pushstring(info->L, msg);
+    info->HasError = 1;
+    info->ErrorMsgIdx = lua_absindex(info->L, -1);
 }
 
 struct pesapi_env_ref__

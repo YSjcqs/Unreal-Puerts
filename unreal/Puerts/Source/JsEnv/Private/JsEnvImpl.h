@@ -330,6 +330,8 @@ private:
 
     void NewStructByScriptStruct(const v8::FunctionCallbackInfo<v8::Value>& Info);
 
+    void MakeWeakObjectPtr(const v8::FunctionCallbackInfo<v8::Value>& Info);
+
 #if !defined(ENGINE_INDEPENDENT_JSENV)
     void MakeUClass(const v8::FunctionCallbackInfo<v8::Value>& Info);
 
@@ -344,6 +346,8 @@ private:
     void SetInspectorCallback(const v8::FunctionCallbackInfo<v8::Value>& Info);
 
     void DispatchProtocolMessage(const v8::FunctionCallbackInfo<v8::Value>& Info);
+
+    void IsQuickJS(const v8::FunctionCallbackInfo<v8::Value>& Info);
 
 #ifndef WITH_QUICKJS
     v8::MaybeLocal<v8::Module> FetchESModuleTree(v8::Local<v8::Context> Context, const FString& FileName);
@@ -691,6 +695,8 @@ private:
     v8::UniquePersistent<v8::FunctionTemplate> MulticastDelegateTemplate;
 
     v8::UniquePersistent<v8::FunctionTemplate> SoftObjectPtrTemplate;
+
+    v8::UniquePersistent<v8::FunctionTemplate> WeakObjectPtrTemplate;
 
     std::map<void*, DelegateObjectInfo> DelegateMap;
 

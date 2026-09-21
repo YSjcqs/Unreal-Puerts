@@ -359,13 +359,13 @@ int pesapi_is_boolean(pesapi_env env, pesapi_value pvalue)
 int pesapi_is_int32(pesapi_env env, pesapi_value pvalue)
 {
     auto value = v8impl::V8LocalValueFromPesapiValue(pvalue);
-    return value->IsNumber();
+    return value->IsInt32();
 }
 
 int pesapi_is_uint32(pesapi_env env, pesapi_value pvalue)
 {
     auto value = v8impl::V8LocalValueFromPesapiValue(pvalue);
-    return value->IsNumber();
+    return value->IsUint32();
 }
 
 int pesapi_is_int64(pesapi_env env, pesapi_value pvalue)
@@ -506,13 +506,23 @@ PESAPI_EXTERN pesapi_env pesapi_get_env(pesapi_callback_info pinfo)
 void* pesapi_get_native_holder_ptr(pesapi_callback_info pinfo)
 {
     auto info = reinterpret_cast<const v8::FunctionCallbackInfo<v8::Value>*>(pinfo);
+#if V8_MAJOR_VERSION >= 13 && V8_MINOR_VERSION >= 6
+    // V8 13.6+: FunctionCallbackInfo::Holder() was removed.
+    // Use `This()` (the receiver) as the closest equivalent holder object.
+    return puerts::DataTransfer::GetPointerFast<void>((*info).This());
+#else
     return puerts::DataTransfer::GetPointerFast<void>((*info).Holder());
+#endif
 }
 
 const void* pesapi_get_native_holder_typeid(pesapi_callback_info pinfo)
 {
     auto info = reinterpret_cast<const v8::FunctionCallbackInfo<v8::Value>*>(pinfo);
+#if V8_MAJOR_VERSION >= 13 && V8_MINOR_VERSION >= 6
+    return puerts::DataTransfer::GetPointerFast<void>((*info).This(), 1);
+#else
     return puerts::DataTransfer::GetPointerFast<void>((*info).Holder(), 1);
+#endif
 }
 
 void* pesapi_get_userdata(pesapi_callback_info pinfo)
@@ -682,6 +692,11 @@ void pesapi_release_value_ref(pesapi_value_ref value_ref)
     {
         if (!value_ref->env_life_cycle_tracker.expired())
         {
+            // v8::Persistent uses NonCopyablePersistentTraits (kResetInDestructor == false),
+            // so ~pesapi_value_ref__() does NOT release the strong V8 global root. Without an
+            // explicit Reset(), a JS function marshaled into a C# delegate (this path never calls
+            // pesapi_set_ref_weak) and everything its closure captures leak for the isolate's lifetime.
+            value_ref->value_persistent.Reset();
             value_ref->~pesapi_value_ref__();
         }
         ::operator delete(static_cast<void*>(value_ref));
@@ -844,10 +859,13 @@ pesapi_value pesapi_eval(pesapi_env env, const uint8_t* code, size_t code_size, 
         v8::String::NewFromUtf8(isolate, path == nullptr ? "" : path, v8::NewStringType::kNormal).ToLocalChecked();
     std::vector<char> buff;
     buff.reserve(code_size + 1);
-    memcpy(buff.data(), code, code_size);
-    buff.data()[code_size] = '\0';
+    buff.insert(buff.end(), code, code + code_size);
+    buff.push_back('\0');
     v8::Local<v8::String> source = v8::String::NewFromUtf8(isolate, buff.data(), v8::NewStringType::kNormal).ToLocalChecked();
-#if V8_MAJOR_VERSION > 8
+#if defined(V8_129_OR_NEWER)
+    // V8 >= 12.9: ScriptOrigin does not take Isolate*.
+    v8::ScriptOrigin origin(url);
+#elif V8_MAJOR_VERSION > 8
     v8::ScriptOrigin origin(isolate, url);
 #else
     v8::ScriptOrigin origin(url);
